@@ -155,6 +155,35 @@ describe('cron middleware', () => {
     });
   });
 
+  it.only('should only run cron once', async () => {
+    user.lastCron = moment(new Date()).subtract({days: 2});
+    let now = new Date();
+    await user.save();
+
+    let promise1 = new Promise((resolve, reject) => {
+      cronMiddleware(req, res, 0, (err) => {
+        if (err) return reject(err);
+        expect(moment(now).isSame(user.lastCron, 'day'));
+        expect(moment(now).isSame(user.auth.timestamps.loggedin, 'day'));
+        resolve();
+      });
+    });
+
+    req.delay = 1500;
+
+    let promise2 = new Promise((resolve, reject) => {
+      cronMiddleware(req, res, (err) => {
+        if (err) return reject(err);
+        expect(moment(now).isSame(user.lastCron, 'day'));
+        expect(moment(now).isSame(user.auth.timestamps.loggedin, 'day'));
+        resolve();
+      });
+    });
+
+    await promise1;
+    await promise2;
+  });
+
   it('does damage for missing dailies', async () => {
     let hpBefore = user.stats.hp;
     user.lastCron = moment(new Date()).subtract({days: 2});

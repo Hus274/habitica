@@ -7,12 +7,13 @@ import { recoverCron, cron } from '../libs/cron';
 // Wait this length of time in ms before attempting another cron
 const CRON_TIMEOUT_WAIT = new Date(60 * 60 * 1000).getTime();
 
-async function checkForActiveCron (user, now) {
+async function checkForActiveCron (user, now, delay) {
   // set _cronSignature to current time in ms since epoch time so we can make sure to wait at least CRONT_TIMEOUT_WAIT before attempting another cron
   let _cronSignature = now.getTime();
   // Calculate how long ago cron must have been attempted to try again
   let cronRetryTime = _cronSignature - CRON_TIMEOUT_WAIT;
 
+  console.log( delay + ' checking');
   // To avoid double cron we first set _cronSignature and then check that it's not changed while processing
   let userUpdateResult = await User.update({
     _id: user._id,
@@ -23,16 +24,35 @@ async function checkForActiveCron (user, now) {
   }, {
     $set: {
       _cronSignature,
-      lastCron: now, // setting lastCron now so we don't risk re-running parts of cron if it fails
       'auth.timestamps.loggedin': now,
     },
   }).exec();
+
+  console.log('executed');
+
+  console.log(userUpdateResult);
 
   // If the cron signature is already set, cron is running in another request
   // throw an error and recover later,
   if (userUpdateResult.nMatched === 0 || userUpdateResult.nModified === 0) {
     throw new Error('CRON_ALREADY_RUNNING');
   }
+}
+
+async function wait(delay) {
+  var start = new Date().getTime();
+  var end = start;
+  while(end < start + delay) {
+    end = new Date().getTime();
+ }
+}
+
+async function updateLastCron(user, now){
+  await User.update({
+    _id: user._id,
+  }, {
+    lastCron: now, // setting lastCron now so we don't risk re-running parts of cron if it fails
+  }).exec();
 }
 
 async function unlockUser (user) {
@@ -43,6 +63,14 @@ async function unlockUser (user) {
   }).exec();
 }
 
+function timeout(ms) {
+    return new Promise(resolve => setTimeout(resolve, ms));
+}
+async function sleep(fn, ...args) {
+    await timeout(3000);
+    return fn(...args);
+}
+
 async function cronAsync (req, res) {
   let user = res.locals.user;
   if (!user) return null; // User might not be available when authentication is not mandatory
@@ -51,15 +79,30 @@ async function cronAsync (req, res) {
   let now = new Date();
 
   try {
-    let {daysMissed, timezoneOffsetFromUserPrefs} = user.daysUserHasMissed(now, req);
+    console.log('waiting');
+    if (!req.delay){
+      await checkForActiveCron(user, now, req.delay);
+    } else {
+      await sleep(checkForActiveCron,user,now,req.delay);
+      console.log('done');
+    }
 
-    await checkForActiveCron(user, now);
+    console.log('after check');
+    user = await User.findOne({_id: user._id}).exec();
+    let {daysMissed, timezoneOffsetFromUserPrefs} = user.daysUserHasMissed(now, req);
+    console.log(daysMissed);
+
+    await updateLastCron(user, now);
+
 
     if (daysMissed <= 0) {
+      console.log('exitting');
       if (user.isModified()) await user.save();
       await unlockUser(user);
       return null;
     }
+
+    console.log('hit');
 
     let tasks = await Tasks.Task.find({
       userId: user._id,
@@ -103,6 +146,7 @@ async function cronAsync (req, res) {
     await Group.processQuestProgress(user, progress);
 
     // Set _cronSignature, lastCron and auth.timestamps.loggedin to signal end of cron
+    console.log('releasing');
     await User.update({
       _id: user._id,
     }, {
@@ -110,13 +154,16 @@ async function cronAsync (req, res) {
         _cronSignature: 'NOT_RUNNING',
       },
     }).exec();
+    console.log('released');
 
     // Reload user
     res.locals.user = await User.findOne({_id: user._id}).exec();
     return null;
   } catch (err) {
+    console.log(req.delay + " " + err);
     // If cron was aborted for a race condition try to recover from it
     if (err.message === 'CRON_ALREADY_RUNNING') {
+      console.log('cron already running');
       // Recovering after abort, wait 300ms and reload user
       // do it for max 5 times then reset _cronSignature so that it doesn't prevent cron from running
       // at the next request
